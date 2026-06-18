@@ -90,6 +90,37 @@ The PR opened from that branch is the canonical demo:
 └── tests/
 ```
 
+## Automated coverage review on pull requests
+
+This repo also ships a workflow,
+`.github/workflows/copilot-coverage-review.yml`, that runs on every
+pull request and:
+
+1. Runs `jest --coverage --coverageReporters=json-summary` on both the
+   PR's base commit and head commit.
+2. Diffs the two coverage summaries with `scripts/coverage-diff.js`.
+3. Captures the PR's unified diff for `src/**` and `tests/**`.
+4. Installs the GitHub Copilot CLI (`npm install -g @github/copilot`)
+   and runs it headlessly (`copilot -p "<prompt>"`) with a prompt that
+   embeds the coverage delta plus the diff, asking Copilot to suggest
+   concrete additional Jest + Supertest tests for under-covered changed
+   code.
+5. Posts (or updates) a single sticky PR comment containing the
+   coverage delta table and Copilot's suggestions.
+
+### Required configuration
+
+- Repository secret `COPILOT_CLI_TOKEN`: a personal access token with
+  Copilot subscription access. Used by the headless `copilot` CLI.
+- The workflow uses the default `GITHUB_TOKEN` (with
+  `pull-requests: write`) to post the comment.
+
+### Behavior on forks
+
+PRs from forks do not have access to secrets, so the workflow still
+runs the coverage diff but skips the Copilot CLI step and notes that
+in the PR comment.
+
 ## License
 
 MIT (demo only).

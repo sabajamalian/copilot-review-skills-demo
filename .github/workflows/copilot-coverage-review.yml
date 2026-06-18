@@ -1,0 +1,191 @@
+name: copilot-coverage-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: copilot-coverage-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  coverage-and-suggest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies (head)
+        run: npm ci
+
+      - name: Capture PR diff
+        run: |
+          mkdir -p .copilot-coverage
+          git diff "$BASE_SHA"..."$HEAD_SHA" -- 'src/**' 'tests/**' \
+            > .copilot-coverage/pr.diff || true
+          wc -c .copilot-coverage/pr.diff || true
+
+      - name: Run head coverage
+        id: head_cov
+        run: |
+          mkdir -p .copilot-coverage
+          npx --no-install jest \
+            --coverage \
+            --coverageReporters=json-summary \
+            --coverageReporters=text-summary \
+            --silent || echo "head jest exited non-zero"
+          if [ -f coverage/coverage-summary.json ]; then
+            cp coverage/coverage-summary.json .copilot-coverage/coverage-head.json
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run base coverage
+        id: base_cov
+        continue-on-error: true
+        run: |
+          set +e
+          git stash --include-untracked --quiet
+          git checkout --force "$BASE_SHA"
+          if [ -f package-lock.json ]; then npm ci; fi
+          rm -rf coverage
+          npx --no-install jest \
+            --coverage \
+            --coverageReporters=json-summary \
+            --coverageReporters=text-summary \
+            --silent
+          if [ -f coverage/coverage-summary.json ]; then
+            cp coverage/coverage-summary.json .copilot-coverage/coverage-base.json
+          fi
+          exit 0
+
+      - name: Restore head checkout
+        if: always()
+        run: |
+          set +e
+          git checkout --force "$HEAD_SHA"
+          if [ -f package-lock.json ]; then npm ci; fi
+          exit 0
+
+      - name: Build coverage delta
+        run: |
+          node scripts/coverage-diff.js \
+            --base .copilot-coverage/coverage-base.json \
+            --head .copilot-coverage/coverage-head.json \
+            --md .copilot-coverage/coverage-delta.md \
+            --txt .copilot-coverage/coverage-delta.txt \
+            --repo-root "$GITHUB_WORKSPACE"
+          echo "--- coverage-delta.md ---"
+          cat .copilot-coverage/coverage-delta.md
+
+      - name: Build Copilot prompt
+        run: |
+          node scripts/build-copilot-prompt.js \
+            --coverage .copilot-coverage/coverage-delta.txt \
+            --diff .copilot-coverage/pr.diff \
+            --out .copilot-coverage/prompt.txt \
+            --max-diff-bytes 150000
+          echo "Prompt size: $(wc -c < .copilot-coverage/prompt.txt) bytes"
+
+      - name: Install GitHub Copilot CLI
+        if: env.IS_FORK == 'false'
+        run: npm install -g @github/copilot
+
+      - name: Run headless Copilot CLI
+        id: copilot
+        if: env.IS_FORK == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "no-token" > .copilot-coverage/copilot-status.txt
+            exit 0
+          fi
+          PROMPT="$(cat .copilot-coverage/prompt.txt)"
+          set +e
+          copilot -p "$PROMPT" --allow-all-tools --no-color \
+            > .copilot-coverage/copilot-suggestions.md \
+            2> .copilot-coverage/copilot-stderr.log
+          rc=$?
+          set -e
+          echo "copilot exit code: $rc"
+          if [ "$rc" -ne 0 ] || [ ! -s .copilot-coverage/copilot-suggestions.md ]; then
+            echo "failed" > .copilot-coverage/copilot-status.txt
+            tail -n 50 .copilot-coverage/copilot-stderr.log || true
+          else
+            echo "ok" > .copilot-coverage/copilot-status.txt
+          fi
+
+      - name: Compose PR comment body
+        id: body
+        run: |
+          {
+            echo '<!-- copilot-coverage-review -->'
+            echo '## Copilot coverage review'
+            echo ''
+            cat .copilot-coverage/coverage-delta.md
+            echo ''
+            if [ "${IS_FORK}" = "true" ]; then
+              echo '_Copilot test suggestions are skipped on PRs from forks (no access to secrets)._'
+            elif [ -s .copilot-coverage/copilot-suggestions.md ] && \
+                 [ "$(cat .copilot-coverage/copilot-status.txt 2>/dev/null)" = "ok" ]; then
+              echo '## Suggested additional tests (from GitHub Copilot CLI)'
+              echo ''
+              cat .copilot-coverage/copilot-suggestions.md
+            else
+              echo '## Suggested additional tests'
+              echo ''
+              echo '_Copilot CLI did not produce suggestions for this run. Check the workflow logs for details._'
+            fi
+            echo ''
+            echo "<sub>Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (commit ${HEAD_SHA})</sub>"
+          } > .copilot-coverage/comment.md
+          echo "Comment size: $(wc -c < .copilot-coverage/comment.md) bytes"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copilot-coverage-review
+          path: .copilot-coverage/
+          retention-days: 7
+
+      - name: Find existing sticky comment
+        id: find_comment
+        if: env.IS_FORK == 'false'
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '<!-- copilot-coverage-review -->'
+
+      - name: Post or update sticky PR comment
+        if: env.IS_FORK == 'false'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: .copilot-coverage/comment.md
+          edit-mode: replace
