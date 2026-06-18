@@ -20,14 +20,20 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-      # Outside the working tree so it survives git operations.
-      OUT_DIR: ${{ runner.temp }}/copilot-coverage
     steps:
       - name: Checkout PR head with full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Resolve output directory
+        run: |
+          # OUT_DIR lives outside the working tree so it survives git
+          # stash / worktree operations during base-coverage capture.
+          OUT_DIR="${RUNNER_TEMP}/copilot-coverage"
+          mkdir -p "$OUT_DIR"
+          echo "OUT_DIR=$OUT_DIR" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -37,9 +43,6 @@ jobs:
 
       - name: Install dependencies (head)
         run: npm ci
-
-      - name: Prepare output directory
-        run: mkdir -p "$OUT_DIR"
 
       - name: Capture PR diff
         run: |
