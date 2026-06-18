@@ -20,6 +20,8 @@ jobs:
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+      # Outside the working tree so it survives git operations.
+      OUT_DIR: ${{ runner.temp }}/copilot-coverage
     steps:
       - name: Checkout PR head with full history
         uses: actions/checkout@v4
@@ -36,75 +38,85 @@ jobs:
       - name: Install dependencies (head)
         run: npm ci
 
+      - name: Prepare output directory
+        run: mkdir -p "$OUT_DIR"
+
       - name: Capture PR diff
         run: |
-          mkdir -p .copilot-coverage
-          git diff "$BASE_SHA"..."$HEAD_SHA" -- 'src/**' 'tests/**' \
-            > .copilot-coverage/pr.diff || true
-          wc -c .copilot-coverage/pr.diff || true
+          git diff "$BASE_SHA"..."$HEAD_SHA" \
+            -- '.' \
+               ':(exclude)package-lock.json' \
+               ':(exclude)yarn.lock' \
+               ':(exclude)pnpm-lock.yaml' \
+               ':(exclude)dist' \
+               ':(exclude)build' \
+               ':(exclude)coverage' \
+               ':(exclude)*.snap' \
+            > "$OUT_DIR/pr.diff" || true
+          echo "diff bytes: $(wc -c < "$OUT_DIR/pr.diff")"
 
       - name: Run head coverage
-        id: head_cov
         run: |
-          mkdir -p .copilot-coverage
-          npx --no-install jest \
-            --coverage \
-            --coverageReporters=json-summary \
-            --coverageReporters=text-summary \
-            --silent || echo "head jest exited non-zero"
-          if [ -f coverage/coverage-summary.json ]; then
-            cp coverage/coverage-summary.json .copilot-coverage/coverage-head.json
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run base coverage
-        id: base_cov
-        continue-on-error: true
-        run: |
-          set +e
-          git stash --include-untracked --quiet
-          git checkout --force "$BASE_SHA"
-          if [ -f package-lock.json ]; then npm ci; fi
           rm -rf coverage
           npx --no-install jest \
             --coverage \
             --coverageReporters=json-summary \
-            --coverageReporters=text-summary \
-            --silent
+            --silent || echo "head jest exited non-zero"
           if [ -f coverage/coverage-summary.json ]; then
-            cp coverage/coverage-summary.json .copilot-coverage/coverage-base.json
+            cp coverage/coverage-summary.json "$OUT_DIR/coverage-head.json"
+            echo "head coverage captured ($(wc -c < "$OUT_DIR/coverage-head.json") bytes)"
+          else
+            echo "head coverage-summary.json not found"
           fi
-          exit 0
 
-      - name: Restore head checkout
-        if: always()
+      - name: Run base coverage (in a separate worktree)
+        continue-on-error: true
         run: |
           set +e
-          git checkout --force "$HEAD_SHA"
-          if [ -f package-lock.json ]; then npm ci; fi
+          BASE_DIR="${RUNNER_TEMP}/base-checkout"
+          rm -rf "$BASE_DIR"
+          git worktree add --detach "$BASE_DIR" "$BASE_SHA"
+          if [ $? -ne 0 ]; then
+            echo "git worktree add failed for base"
+            exit 0
+          fi
+          (
+            cd "$BASE_DIR"
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            rm -rf coverage
+            npx --no-install jest \
+              --coverage \
+              --coverageReporters=json-summary \
+              --silent
+            if [ -f coverage/coverage-summary.json ]; then
+              cp coverage/coverage-summary.json "$OUT_DIR/coverage-base.json"
+              echo "base coverage captured ($(wc -c < "$OUT_DIR/coverage-base.json") bytes)"
+            else
+              echo "base coverage-summary.json not found"
+            fi
+          )
+          git worktree remove --force "$BASE_DIR" || true
           exit 0
 
       - name: Build coverage delta
         run: |
           node scripts/coverage-diff.js \
-            --base .copilot-coverage/coverage-base.json \
-            --head .copilot-coverage/coverage-head.json \
-            --md .copilot-coverage/coverage-delta.md \
-            --txt .copilot-coverage/coverage-delta.txt \
+            --base "$OUT_DIR/coverage-base.json" \
+            --head "$OUT_DIR/coverage-head.json" \
+            --md "$OUT_DIR/coverage-delta.md" \
+            --txt "$OUT_DIR/coverage-delta.txt" \
             --repo-root "$GITHUB_WORKSPACE"
           echo "--- coverage-delta.md ---"
-          cat .copilot-coverage/coverage-delta.md
+          cat "$OUT_DIR/coverage-delta.md"
 
       - name: Build Copilot prompt
         run: |
           node scripts/build-copilot-prompt.js \
-            --coverage .copilot-coverage/coverage-delta.txt \
-            --diff .copilot-coverage/pr.diff \
-            --out .copilot-coverage/prompt.txt \
+            --coverage "$OUT_DIR/coverage-delta.txt" \
+            --diff "$OUT_DIR/pr.diff" \
+            --out "$OUT_DIR/prompt.txt" \
             --max-diff-bytes 150000
-          echo "Prompt size: $(wc -c < .copilot-coverage/prompt.txt) bytes"
+          echo "Prompt size: $(wc -c < "$OUT_DIR/prompt.txt") bytes"
 
       - name: Install GitHub Copilot CLI
         if: env.IS_FORK == 'false'
@@ -119,40 +131,39 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "no-token" > .copilot-coverage/copilot-status.txt
+            echo "no-token" > "$OUT_DIR/copilot-status.txt"
             exit 0
           fi
-          PROMPT="$(cat .copilot-coverage/prompt.txt)"
+          PROMPT="$(cat "$OUT_DIR/prompt.txt")"
           set +e
           copilot -p "$PROMPT" --allow-all-tools --no-color \
-            > .copilot-coverage/copilot-suggestions.md \
-            2> .copilot-coverage/copilot-stderr.log
+            > "$OUT_DIR/copilot-suggestions.md" \
+            2> "$OUT_DIR/copilot-stderr.log"
           rc=$?
           set -e
           echo "copilot exit code: $rc"
-          if [ "$rc" -ne 0 ] || [ ! -s .copilot-coverage/copilot-suggestions.md ]; then
-            echo "failed" > .copilot-coverage/copilot-status.txt
-            tail -n 50 .copilot-coverage/copilot-stderr.log || true
+          if [ "$rc" -ne 0 ] || [ ! -s "$OUT_DIR/copilot-suggestions.md" ]; then
+            echo "failed" > "$OUT_DIR/copilot-status.txt"
+            tail -n 50 "$OUT_DIR/copilot-stderr.log" || true
           else
-            echo "ok" > .copilot-coverage/copilot-status.txt
+            echo "ok" > "$OUT_DIR/copilot-status.txt"
           fi
 
       - name: Compose PR comment body
-        id: body
         run: |
           {
             echo '<!-- copilot-coverage-review -->'
             echo '## Copilot coverage review'
             echo ''
-            cat .copilot-coverage/coverage-delta.md
+            cat "$OUT_DIR/coverage-delta.md"
             echo ''
             if [ "${IS_FORK}" = "true" ]; then
               echo '_Copilot test suggestions are skipped on PRs from forks (no access to secrets)._'
-            elif [ -s .copilot-coverage/copilot-suggestions.md ] && \
-                 [ "$(cat .copilot-coverage/copilot-status.txt 2>/dev/null)" = "ok" ]; then
+            elif [ -s "$OUT_DIR/copilot-suggestions.md" ] && \
+                 [ "$(cat "$OUT_DIR/copilot-status.txt" 2>/dev/null)" = "ok" ]; then
               echo '## Suggested additional tests (from GitHub Copilot CLI)'
               echo ''
-              cat .copilot-coverage/copilot-suggestions.md
+              cat "$OUT_DIR/copilot-suggestions.md"
             else
               echo '## Suggested additional tests'
               echo ''
@@ -160,16 +171,17 @@ jobs:
             fi
             echo ''
             echo "<sub>Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} (commit ${HEAD_SHA})</sub>"
-          } > .copilot-coverage/comment.md
-          echo "Comment size: $(wc -c < .copilot-coverage/comment.md) bytes"
+          } > "$OUT_DIR/comment.md"
+          echo "Comment size: $(wc -c < "$OUT_DIR/comment.md") bytes"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: copilot-coverage-review
-          path: .copilot-coverage/
+          path: ${{ runner.temp }}/copilot-coverage/
           retention-days: 7
+          if-no-files-found: warn
 
       - name: Find existing sticky comment
         id: find_comment
@@ -187,5 +199,5 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           comment-id: ${{ steps.find_comment.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
-          body-path: .copilot-coverage/comment.md
+          body-path: ${{ runner.temp }}/copilot-coverage/comment.md
           edit-mode: replace
