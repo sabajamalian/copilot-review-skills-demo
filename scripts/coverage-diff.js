@@ -68,24 +68,36 @@ function fmtDelta(b, h) {
   return `${sign}${d.toFixed(2)}`;
 }
 
-function relativizeKey(key, repoRoot) {
+function relativizeKey(key, root) {
   if (!key) return key;
-  if (repoRoot && key.startsWith(repoRoot)) {
-    return key.slice(repoRoot.length).replace(/^[\\/]+/, '');
+  if (root && key.startsWith(root)) {
+    return key.slice(root.length).replace(/^[\\/]+/, '');
   }
   return key;
 }
 
-function buildRows(base, head, repoRoot) {
-  const keys = new Set();
-  if (base) Object.keys(base).forEach((k) => keys.add(k));
-  if (head) Object.keys(head).forEach((k) => keys.add(k));
-  keys.delete('total');
+function buildRows(base, head, baseRoot, headRoot) {
+  const merged = new Map();
+  if (head) {
+    for (const k of Object.keys(head)) {
+      if (k === 'total') continue;
+      merged.set(relativizeKey(k, headRoot), { headKey: k });
+    }
+  }
+  if (base) {
+    for (const k of Object.keys(base)) {
+      if (k === 'total') continue;
+      const rel = relativizeKey(k, baseRoot);
+      const entry = merged.get(rel) || {};
+      entry.baseKey = k;
+      merged.set(rel, entry);
+    }
+  }
 
   const rows = [];
-  for (const key of keys) {
-    const b = base ? base[key] : null;
-    const h = head ? head[key] : null;
+  for (const [file, refs] of merged) {
+    const b = base && refs.baseKey ? base[refs.baseKey] : null;
+    const h = head && refs.headKey ? head[refs.headKey] : null;
     const metrics = ['lines', 'statements', 'functions', 'branches'];
     const values = {};
     let anyChange = false;
@@ -96,7 +108,7 @@ function buildRows(base, head, repoRoot) {
       if (bp !== hp) anyChange = true;
     }
     rows.push({
-      file: relativizeKey(key, repoRoot),
+      file,
       values,
       anyChange,
       headLines: pct(h, 'lines'),
@@ -110,7 +122,7 @@ function buildRows(base, head, repoRoot) {
   return rows;
 }
 
-function buildMarkdown(base, head, repoRoot) {
+function buildMarkdown(base, head, baseRoot, headRoot) {
   const lines = [];
   lines.push('### Coverage delta (base vs head)');
   lines.push('');
@@ -132,7 +144,7 @@ function buildMarkdown(base, head, repoRoot) {
   }
   lines.push('');
 
-  const rows = buildRows(base, head, repoRoot);
+  const rows = buildRows(base, head, baseRoot, headRoot);
   const changed = rows.filter((r) => r.anyChange);
   if (changed.length === 0) {
     lines.push('_No per-file coverage changes detected._');
@@ -159,7 +171,7 @@ function buildMarkdown(base, head, repoRoot) {
   return lines.join('\n');
 }
 
-function buildPlainText(base, head, repoRoot) {
+function buildPlainText(base, head, baseRoot, headRoot) {
   const out = [];
   out.push('Coverage delta (base vs head):');
   if (!base && !head) {
@@ -174,7 +186,7 @@ function buildPlainText(base, head, repoRoot) {
     out.push(`  total ${m}: ${fmtPct(bp)} -> ${fmtPct(hp)} (${fmtDelta(bp, hp)})`);
   }
 
-  const rows = buildRows(base, head, repoRoot).filter((r) => r.anyChange);
+  const rows = buildRows(base, head, baseRoot, headRoot).filter((r) => r.anyChange);
   if (rows.length) {
     out.push('');
     out.push('Per-file changes (worst-covered head first, top 20):');
@@ -192,9 +204,11 @@ function main() {
   const base = safeRead(args.base);
   const head = safeRead(args.head);
   const repoRoot = args['repo-root'] || process.cwd();
+  const baseRoot = args['base-root'] || repoRoot;
+  const headRoot = args['head-root'] || repoRoot;
 
-  const md = buildMarkdown(base, head, repoRoot);
-  const txt = buildPlainText(base, head, repoRoot);
+  const md = buildMarkdown(base, head, baseRoot, headRoot);
+  const txt = buildPlainText(base, head, baseRoot, headRoot);
 
   if (args.md) {
     fs.mkdirSync(path.dirname(path.resolve(args.md)), { recursive: true });

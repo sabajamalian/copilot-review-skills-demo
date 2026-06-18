@@ -108,7 +108,8 @@ jobs:
             --head "$OUT_DIR/coverage-head.json" \
             --md "$OUT_DIR/coverage-delta.md" \
             --txt "$OUT_DIR/coverage-delta.txt" \
-            --repo-root "$GITHUB_WORKSPACE"
+            --head-root "$GITHUB_WORKSPACE" \
+            --base-root "${RUNNER_TEMP}/base-checkout"
           echo "--- coverage-delta.md ---"
           cat "$OUT_DIR/coverage-delta.md"
 
