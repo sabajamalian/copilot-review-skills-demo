@@ -66,8 +66,7 @@ introduces one violation per skill:
 - **Test coverage:** new and changed routes with no test updates.
 
 The PR opened from that branch is the canonical demo:
-[Open the demo PR](https://github.com/sabajamalian/copilot-review-skills-demo/pulls)
-(the link is filled in once the PR is created during setup).
+[PR #1: demo seeded issues](https://github.com/sabajamalian/copilot-review-skills-demo/pull/1).
 
 ## Repository layout
 
