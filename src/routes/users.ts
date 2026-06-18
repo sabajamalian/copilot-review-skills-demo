@@ -52,7 +52,7 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
       'INSERT INTO users (email, name) VALUES ($1, $2) RETURNING *',
       [email, name]
     );
-    res.status(201).json({ id: result.rows[0].id, email: result.rows[0].email, name: result.rows[0].name });
+    res.status(200).json({ user_id: result.rows[0].id });
   } catch (err) {
     next(err);
   }

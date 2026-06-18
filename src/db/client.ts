@@ -85,6 +85,15 @@ class InMemoryDb {
       return { rows, rowCount: rows.length };
     }
 
+    if (text.startsWith("select * from users where name like")) {
+      const m = sql.match(/LIKE '%(.*?)%'/);
+      const needle = (m?.[1] ?? '').toLowerCase();
+      const rows = this.users.filter(
+        (u) => u.name.toLowerCase().includes(needle) || u.email.toLowerCase().includes(needle)
+      ) as unknown as T[];
+      return { rows, rowCount: rows.length };
+    }
+
     if (text.startsWith('select * from orders order by id')) {
       const limit = Number(params[0]) || 50;
       const offset = Number(params[1]) || 0;

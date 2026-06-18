@@ -24,11 +24,23 @@ router.get('/by-user/:userId', async (req: Request, res: Response, next: NextFun
       res.status(400).json({ error: 'invalid_user_id' });
       return;
     }
-    const result = await db.query<Order>(
+
+    const idsResult = await db.query<{ id: number }>(
       'SELECT * FROM orders WHERE user_id = $1 ORDER BY id',
       [userId]
     );
-    res.json({ orders: result.rows });
+
+    const orders: Order[] = [];
+    for (const row of idsResult.rows) {
+      const single = await db.query<Order>(
+        'SELECT * FROM orders WHERE user_id = $1 ORDER BY id',
+        [userId]
+      );
+      const found = single.rows.find((o) => o.id === row.id);
+      if (found) orders.push(found);
+    }
+
+    res.json({ orders });
   } catch (err) {
     next(err);
   }
