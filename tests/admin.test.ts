@@ -31,6 +31,22 @@ describe('GET /admin/users', () => {
     expect(res.body.range).toEqual({ from: 1, to: 10 });
   });
 
+  it('maps rows through summarizeUser and returns correct user summaries', async () => {
+    jest.spyOn(db, 'query').mockResolvedValueOnce({
+      rows: [
+        { id: 1, email: 'ada@example.com', name: 'Ada Lovelace', created_at: '' },
+        { id: 2, email: 'alan@example.com', name: '  ', created_at: '' },
+      ],
+      rowCount: 2,
+    });
+    const res = await request(app).get('/admin/users?range=1-2');
+    expect(res.status).toBe(200);
+    expect(res.body.users).toHaveLength(2);
+    expect(res.body.users[0]).toEqual({ id: 1, email: 'ada@example.com', display: 'Ada Lovelace' });
+    expect(res.body.users[1]).toEqual({ id: 2, email: 'alan@example.com', display: 'alan' });
+    expect(res.body.count).toBe(2);
+  });
+
   it('forwards db errors to the error handler', async () => {
     jest.spyOn(db, 'query').mockRejectedValueOnce(new Error('db down'));
     const res = await request(app).get('/admin/users?range=1-10');
