@@ -1,6 +1,7 @@
 import express, { Application, Request, Response } from 'express';
 import users from './routes/users';
 import orders from './routes/orders';
+import admin from './routes/admin';
 import { errorHandler } from './middleware/errorHandler';
 
 export function createApp(): Application {
@@ -13,6 +14,7 @@ export function createApp(): Application {
 
   app.use('/users', users);
   app.use('/orders', orders);
+  app.use('/admin', admin);
 
   app.use(errorHandler);
   return app;
